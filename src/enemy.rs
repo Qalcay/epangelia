@@ -171,9 +171,9 @@ fn compose_name(rank: Rank, resist: u8, rng: &mut impl Rng) -> String {
     let noun = pool[rng.random_range(0..pool.len())];
     let prefix = match rank {
         Rank::Normal => "",
-        Rank::Elite => "Mighty",
-        Rank::Boss => "Colossal",
-        Rank::Overlord => "Chaos",
+        Rank::Elite => "Mighty ",
+        Rank::Boss => "Colossal ",
+        Rank::Overlord => "Chaos ",
     };
-    format!("{prefix} {} {noun}", spec.unwrap_or(""))
+    format!("{prefix}{} {noun}", spec.unwrap_or(""))
 }

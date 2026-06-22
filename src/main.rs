@@ -9,6 +9,7 @@ mod exist;
 mod id;
 mod time;
 mod hash;
+mod theme;
 
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, poll},
@@ -32,6 +33,8 @@ struct Board {
     hp_enemy_remaining: f64, // keep state of enemy hp as it is being fought
     prev_tick: Instant,
     battles: u64, // in game eliminations
+    grave: Vec<String>,
+    theme: theme::Theme,
 }
 
 impl Board {
@@ -47,6 +50,8 @@ impl Board {
             hp_enemy_remaining: 0.0, // why 0?
             prev_tick: Instant::now(),
             battles: 0,
+            grave: Vec::new(),
+            theme: theme::Theme::dark_mode(),
         };
         board.push(" a stranger enters... ");
         board.next_spawn(tune::Rank::Normal);
@@ -82,18 +87,28 @@ impl Board {
             self.battles += 1;
             let (coin, amt) = enemy.drop(&mut self.rng);
             self.game.add_coin(coin, amt);
+            let coin_tag = match coin {
+                tune::Coin::Copper => "Cu",
+                tune::Coin::Silver => "Ag",
+                tune::Coin::Gold => "Au",
+                tune::Coin::Platinum => "Pt",
+            };
+
+            self.grave.insert(0, format!("+{:.0}{}..'{}'", amt, coin_tag, enemy.name));
+            //self.grave.insert(0, format!("'{}' .. ({:.0}{})", enemy.name, amt, coin_tag));
+            self.grave.truncate(33);
             let rank = match self.battles % 21 {
                 0 => tune::Rank::Overlord,
                 n if n % 11 == 0 => tune::Rank::Boss,
                 n if n % 4 == 0 => tune::Rank::Elite,
                 _ => tune::Rank::Normal,
             };
-            if !matches!(rank, tune::Rank::Normal) {
+            /*if !matches!(rank, tune::Rank::Normal) {
                 self.push_stylize(Line::from(vec![
                     Span::styled(format!("[ {} ]", enemy.name),
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
                 ]));
-            }
+            }*/
             self.next_spawn(rank);
         }
     }
@@ -117,19 +132,31 @@ impl Board {
             ["next"] => { self.game.stage += 1;
                 self.game.top_stage = self.game.stage.max(self.game.stage);
                 self.next_spawn(tune::Rank::Normal);
-                self.push(format!("stage {}", self.game.stage)); }
+                //self.push(format!("stage {}", self.game.stage));
+            }
             ["prev"] => {
                 if self.game.stage > 1 {
                     self.game.stage -= 1;
                     self.next_spawn(tune::Rank::Normal);
-                    self.push(format!("stage {}", self.game.stage));
+                    //self.push(format!("stage {}", self.game.stage));
                 }
             }
 
             ["gems"] => self.comd_gems(),
-            ["buy", g] => { if let Ok(gi) = g.parse::<u8>() { self.comd_store(gi); }
-                else { self.push("buy <gem 0-31>"); }},
-            ["crack", g, e] => self.comd_crack(g, e),
+            ["buy", g] => match resolve_gem(g) {
+                Some(gi) => self.comd_store(gi, 1),
+                None => self.push("buy <gem> <count>"),
+            },
+            ["buy", g, n] => match (resolve_gem(g), n.parse::<u32>()) {
+                (Some(gi), Ok(count)) => self.comd_store(gi, count.max(1)),
+                _ => self.push("buy <gem> <count>"),
+            },
+            //["buy", g] => { if let Ok(gi) = g.parse::<u8>() { self.comd_store(gi); }
+            //    else { self.push("buy <gem 0-31>"); }},
+            /*["crack", g, e] => match (resolve_gem(g), resolve_element(e)) {
+                comd_crack(g, e),
+            }*/
+            //["crack", g, e] => self.comd_crack(g, e),
             ["bag"] => self.comd_bag(),
             ["runs"] => self.comd_runs(),
             ["runs", n] => { let k = n.parse::<usize>().unwrap_or(20); self.comd_runs_n(k); }
@@ -213,11 +240,22 @@ impl Board {
         }
     }
 
-    fn comd_store(&mut self, gem: u8) {
-        match self.game.buy_gem(gem) {
-            Ok(_) => self.push(format!(" Bought {} (Gem {})", gems::gem_name(gem), gem)),
-            Err(e) => self.push(format!("{e} Not Enough Coins! ")),
+    fn comd_store(&mut self, gem: u8, count: u32) {
+        let mut bought = 0u32;
+        let mut last_err = String::new();
+        for _ in 0..count {
+            match self.game.buy_gem(gem) {
+                Ok(_) => bought += 1,
+                Err(e) => { last_err = e; break; },
+            }
         }
+        if bought > 0 {
+            self.push(format!(" Acquired {}x {} (Gem {})", bought, gems::gem_name(gem), gem))
+        }
+        if bought < count {
+            self.push(format!(" Only had enough for {}! ''{}''", bought, last_err));
+        }
+
     }
 
     fn comd_crack(&mut self, g: &str, el: &str) {
@@ -324,6 +362,17 @@ impl Board {
     }
 }
 
+fn resolve_gem(query: &str) -> Option<u8> {
+    if let Ok(n) = query.parse::<u8>() {
+        if (n as usize) < gems::N_GEMS { return Some(n); }
+    }
+    let q = query.to_lowercase();
+    let matches: Vec<u8> = (0..gems::N_GEMS as u8)
+        .filter(|&id| gems::gem_name(id).to_lowercase().contains(&q))
+        .collect();
+    if matches.len() == 1 { Some(matches[0]) } else { None }
+}
+
 fn step_color(step: u32) -> Color {
     match step {
         1..=2 => Color::Gray,
@@ -373,7 +422,43 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
+fn use_commas_u32(n: u32) -> String {
+    let s = n.to_string();
+    format_number_string(&s)
+}
+
+fn use_commas_u64(n: u64) -> String {
+    let s = n.to_string();
+    format_number_string(&s)
+}
+
+fn use_commas_f64(n: f64) -> String {
+    let s = n.to_string();
+    let int_part = if let Some((before, _)) = s.split_once('.') {
+        before
+    } else {
+        &s
+    };
+    format_number_string(int_part)
+}
+
+fn format_number_string(s: &str) -> String {
+    let mut num = String::new();
+    let chars: Vec<char> = s.chars().collect();
+
+    for (i, c) in chars.iter().enumerate() {
+        if i > 0 && (chars.len() - i) % 3 == 0 {
+            num.push(',');
+        }
+        num.push(*c);
+    }
+    num
+}
+
 fn ui(f: &mut Frame, board: &mut Board) {
+    let base = Style::default().fg(board.theme.theme_fg).bg(board.theme.theme_bg);
+    f.render_widget(Block::default().style(base), f.area());
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -382,9 +467,30 @@ fn ui(f: &mut Frame, board: &mut Board) {
             Constraint::Length(3)])
         .split(f.area());
 
+    let top_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(75),
+            Constraint::Percentage(25)])
+        .split(chunks[0]);
+
     let mut header_lines = vec![
-        Line::from(format!(" Stage [ {} ] ..| Wealth [ {:.0}c ] ..| Kills [ {} ] ..| {}",
-            board.game.stage, board.game.net_copper(), board.battles,
+    /*Line::from(format!(" Stage [ {} ] ..| Slain [ {} ] ..| Coins [ {} Pt, {} Au, {} Ag, {} Cu, ] ..| {}",
+        use_commas_u32(board.game.stage),
+        use_commas_u64(board.battles),
+        use_commas_f64(board.game.purse.platinum),
+        use_commas_f64(board.game.purse.gold),
+        use_commas_f64(board.game.purse.silver),
+        use_commas_f64(board.game.purse.copper),*/
+    // Use Copper..Plat below or Plat..Copper above
+        Line::from(format!(" Stage [ {} ] ..| Slain [ {} ] ..| Coins [ {} Cu, {} Ag, {} Au, {} Pt, ] ..| {}",
+            use_commas_u32(board.game.stage),
+            use_commas_u64(board.battles),
+            use_commas_f64(board.game.purse.copper),
+            use_commas_f64(board.game.purse.silver),
+            use_commas_f64(board.game.purse.gold),
+            use_commas_f64(board.game.purse.platinum),
+            //use_commas_f64(board.game.net_copper()),
             if board.does_idle { "" } else { "WAIT" })),
         Line::from(format!("")),
         Line::from(format!(" {}", board.game.clock.date_string())),
@@ -394,33 +500,90 @@ fn ui(f: &mut Frame, board: &mut Board) {
 
     let enemy = board.at_enemy.clone();
     if let Some(e) = &enemy {
+        let total_dmg_num = fight::effective_dps(&board.game.equipped, e);
         let pct = (board.hp_enemy_remaining / e.hp_max * 100.0).clamp(0.0, 100.0);
         header_lines.push(Line::from(vec![
-            Span::styled(format!(">< {}", e.name), Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(">>><<<  {} ", e.name), Style::default().fg(board.theme.color_red).add_modifier(Modifier::BOLD)),
             //Span::from(format!("")),
-            Span::raw(format!(" ({:.0}%) [+{}] <-- [{:.0}] dmg/s",
+        ]));
+        header_lines.push(Line::from(vec![
+            Span::raw(format!(" [ {} ] dmg/s -> ({:.0}%) [+{}]",
+                use_commas_f64(total_dmg_num),
                 pct,
                 gems::element_name(e.resist_element),
-                fight::effective_dps(&board.game.equipped, e))),
+            )),
         ]));
         for (name, contrib, mult) in fight::breakdown(&board.game.equipped, e) {
-            let tag = if mult < 0.5 { "..." } else if mult > 1.2 { "!!!" } else { "o" };
-            header_lines.push(Line::from(format!(" {name}: {contrib:.0} dps (x{mult:.2} {tag})")));
+            let tag = if mult < 0.5 { "" } else if mult > 1.2 { "" } else { "" };
+            //let tag = if mult < 0.5 { "..." } else if mult > 1.2 { "!!!" } else { "o" };
+            let commas_contrib = use_commas_f64(contrib);
+            header_lines.push(Line::from(format!(" {name}: {commas_contrib} dps (x{mult:.2}{tag})")));
         }
     }
 
     f.render_widget(
         Paragraph::new(header_lines).block(Block::default().borders(Borders::ALL).title("~epangelia~")),
         chunks[0]);
+
+    let log_console = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(68),
+            Constraint::Percentage(32)])
+        .split(chunks[1]);
     let visible = chunks[1].height.saturating_sub(2) as usize;
     let start = board.log.len().saturating_sub(visible);
     let lines: Vec<Line> = board.log[start..].to_vec();
     f.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("~log~")),
-        chunks[1]);
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title_bottom("")),
+        log_console[0]);
+
+    /*let top_right_side = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1)])
+        .split(chunks[0]);*/
+
+    let here: Vec<Line> = vec![
+        Line::from(format!("(o )")),
+    ];
+    f.render_widget(
+        Paragraph::new(here).block(Block::default().borders(Borders::ALL).title_bottom("")),
+        top_chunks[1]);
+
+    let right_side = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Min(1)])
+        .split(log_console[1]);
+
+    let show_grave: Vec<Line> = board.grave.iter()
+        .map(|s| Line::from(s.clone())).collect();
+    f.render_widget(
+        Paragraph::new(show_grave).block(Block::default().borders(Borders::ALL).title_bottom("")),
+        right_side[0]);
+
+    // user for weapons?
+    //let showcase =
+
+    let show_purse = &board.game.purse;
+    let gem_total: u32 = board.game.gems.iter().sum();
+    let mut show_ui_inventory: Vec<Line> = vec![
+        Line::from(format!(" Copper         {}", use_commas_f64(show_purse.copper))),
+        Line::from(format!(" Silver         {}", use_commas_f64(show_purse.silver))),
+        Line::from(format!(" Gold           {}", use_commas_f64(show_purse.gold))),
+        Line::from(format!(" Platinum       {}", use_commas_f64(show_purse.platinum))),
+        Line::from(format!(" Gems           {}", gem_total)),
+        //Line::from(format!(" Weapons        {}", show_purse.)),
+        //Line::from(format!(" Rings          ?".to_string())),
+    ];
+    f.render_widget(
+        Paragraph::new(show_ui_inventory).block(Block::default().borders(Borders::ALL).title_bottom("")),
+        right_side[1]);
 
     f.render_widget(
         Paragraph::new(format!("> {}", board.input))
-            .block(Block::default().borders(Borders::ALL).title("~input~")),
+            .block(Block::default().borders(Borders::ALL).title_bottom("")),
         chunks[2]);
 }

@@ -1,5 +1,5 @@
 use crate::tune::{MAX_STEP, REP_CAP_MAX, REP_CAP_MIN, REP_RAMP_MAX, REP_RAMP_MIN, step_power};
-use rand::{Rng, RngExt};
+use rand::{Rng, RngExt, random_range};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -40,16 +40,16 @@ impl Weapon {
             step: 1,
             base: BaseStats {
                 base_dmg: 0.22 * p,
-                attack_speed: 1.5,
-                attack_sweep: 1.0,
-                hit_accuracy: 0.6,
-                crit_chance: 0.05,
-                lucky_chance: 0.05,
+                attack_speed: 1.334,
+                attack_sweep: 1.1,
+                hit_accuracy: 0.5,
+                crit_chance: 0.01,
+                lucky_chance: 0.51,
                 weap_durability: 1.0 * p,
             },
-            mods: Modifiers { crit_dmg: 20.0, rep_ramp: REP_RAMP_MIN, rep_cap: REP_CAP_MIN, element: 0 },
+            mods: Modifiers { crit_dmg: 2.0, rep_ramp: REP_RAMP_MIN, rep_cap: REP_CAP_MIN, element: 0 },
             gem: 0,
-            seed: 1,
+            seed: random_range(1..99999),
         };
         w.name = crate::name::generate(&w);
         w
@@ -75,6 +75,10 @@ impl Weapon {
         w.name = crate::name::generate(&w);
         w
     }
+
+    /*pub fn morningstar() -> Weapon {
+
+    }*/
 
     pub fn roll(step: u32, gem: u8, element: u8, rng: &mut impl Rng) -> Weapon {
         let p = step_power(step);
