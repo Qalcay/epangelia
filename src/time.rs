@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+pub const LUNATION_CYCLE: f64 = 27.334;
 pub const DAYS_WITHIN_MONTH: u64 = 30;
 pub const MONTHS_WITHIN_YEAR: u64 = 12;
 pub const DAYS_WITHIN_YEAR: u64 = DAYS_WITHIN_MONTH * MONTHS_WITHIN_YEAR;
@@ -36,8 +37,11 @@ impl Clock {
     fn year(&self) -> u64 { self.day / DAYS_WITHIN_YEAR + 1}
 
     pub fn lunation_percent(&self) -> f64 {
-        let month_progression = (self.day_of_month() as f64 - 1.0) + self.frac;
-        (month_progression / DAYS_WITHIN_MONTH as f64) * 100.0
+        let abs_period = self.day as f64 + self.frac;
+        let abs_position = (abs_period % LUNATION_CYCLE) / LUNATION_CYCLE;
+        abs_position * 100.0
+        //let month_progression = (self.day_of_month() as f64 - 1.0) + self.frac;
+        //(month_progression / DAYS_WITHIN_MONTH as f64) * 100.0
     }
 
     pub fn illuminate_state(&self) -> f64 {

@@ -79,6 +79,61 @@ pub fn save(g: &Game) -> std::io::Result<String> {
     Ok(short)
 }
 
+pub fn autosave(g: &Game, slot: u32) {
+    let sheet = build_sheet(g);
+    let _ = write_sheet(&recall_path(slot), &sheet);
+}
+
+pub fn recall() -> Result<Game, String> {
+    let mut best: Option<CharacterSheet> = None;
+    for slot in 0..RECALL_SLOTS {
+        let Ok(text) = fs::read_to_string(recall_path(slot)) else { continue; };
+        let OK(sheet) = serde_json::from_str::<CharacterSheet>(&text) else { continue; };
+        if sheet.format_version != SAVE_FORMAT_VERSION { continue; }
+        if best.as_ref().map_or(true, |b| sheet.saved_at > b.saved_at) {
+            best = Some(sheet);
+        }
+    }
+    match best {
+        Some(sheet) => game_from_sheet(&sheet),
+        None => Err("".into()),
+    }
+}
+
+pub fn name_save_runs(g: &Game, name: &str) -> Result<String, String> {
+    let safe: String = name.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-' )
+        .collect();
+    if safe.is_empty() { return Err("").into()); }
+    let path = format!("{SAVE_DIR}/run_{safe}.json");
+    write_sheet(&path, &build_sheetl(g)).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+pub fn list_runs() -> Vec<RunSummary> {
+    ensure_dir();
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(SAVE_DIR) else { return out; }
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("json") { continue; }
+        let Ok(text) = fs::read_to_string(&path) else { continue; };
+        let Ok(sheet) = serde_json::from_str::<CharacterSheet>(&text) else { continue; };
+
+        let loadable = sheet.format_version == SAVE_FORMAT_VERSION;
+        let file = path.file_name().and_then(|f| f.to_str()).unwrap_or("?").to_string();
+        let label = format!(
+            "{:<9} stage{:>3} {}{}",
+            fmt_ago(sheet.saved_at), sheet.stage, file,
+            if loadable { "" } else { "(old)" },
+        );
+        out.push(RunSummary {
+            path: path.to_string_lossy().to_string(),
+            saved_at:
+        })
+    }
+}
+
 fn update_index(entry: IndexEntry) {
     let mut idx = load_index();
     idx.retain(|e| e.short_sig != entry.short_sig);

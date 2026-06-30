@@ -10,6 +10,9 @@ mod id;
 mod time;
 mod hash;
 mod theme;
+mod player;
+mod runs;
+mod extra;
 
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, poll},
@@ -20,7 +23,11 @@ use ratatui::{prelude::*, widgets::*};
 use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
 use std::{io, time::{Duration, Instant}};
 
-const EVAL_GAME_TIME: f64 = 0.11111111111; // days in game per second
+use crate::{gems::gem_id, time::DAYS_WITHIN_MONTH};
+
+const EVAL_GAME_TIME:   f64     = 0.11111111111;    // as 'days in-game' per 'second'
+const BAG_CAP:          usize   = 256;
+const COL_W:            usize   = 22;
 
 struct Board {
     game: game::Game,
@@ -73,6 +80,10 @@ impl Board {
         self.at_enemy = Some(e);
     }
 
+    /*
+     * THE MOST IMPORTNAT LOOP IN THE GAME !!!!
+     *
+     */
     fn tick(&mut self) {
         let now = Instant::now();
         let dt = now.duration_since(self.prev_tick).as_secs_f64();
@@ -123,17 +134,24 @@ impl Board {
             ["qq!"] => self.does_quit = true,
 
             ["help"] => self.comd_advice(),
+
+            ["guide"] => self.comd_guide(),
+
+            ["story"] => self.comd_story(),
+
             ["see"] => self.comd_see(),
 
             ["pause"] => { self.does_idle = !self.does_idle;
                 //self.push(if self.does_idle { "" } else { "" });
                 }
 
-            ["next"] => { self.game.stage += 1;
-                self.game.top_stage = self.game.stage.max(self.game.stage);
+            ["next"] => {
+                self.game.stage = (self.game.stage + 1).min(11);
+                self.game.top_stage = self.game.stage.max(self.game.top_stage);
                 self.next_spawn(tune::Rank::Normal);
                 //self.push(format!("stage {}", self.game.stage));
             }
+
             ["prev"] => {
                 if self.game.stage > 1 {
                     self.game.stage -= 1;
@@ -143,10 +161,12 @@ impl Board {
             }
 
             ["gems"] => self.comd_gems(),
+
             ["buy", g] => match resolve_gem(g) {
                 Some(gi) => self.comd_store(gi, 1),
                 None => self.push("buy <gem> <count>"),
             },
+
             ["buy", g, n] => match (resolve_gem(g), n.parse::<u32>()) {
                 (Some(gi), Ok(count)) => self.comd_store(gi, count.max(1)),
                 _ => self.push("buy <gem> <count>"),
@@ -157,22 +177,74 @@ impl Board {
                 comd_crack(g, e),
             }*/
             //["crack", g, e] => self.comd_crack(g, e),
+
             ["bag"] => self.comd_bag(),
+
             ["runs"] => self.comd_runs(),
+
             ["runs", n] => { let k = n.parse::<usize>().unwrap_or(20); self.comd_runs_n(k); }
+
             ["load", id ] => self.comd_load(id),
+
+            ["recall"] => match exist::recall() {
+                Ok(g) => { self.game = g; self.next_spawn(tune::Rank::Normal);
+                    self.push("Recalled Save Game!"); }
+                Err(e) => self.push(format!("{e}")),
+            },
+
             ["id"] => self.comd_id(),
+
             ["import", path] => self.comd_import(path),
+
+            ["theme"] => {
+                self.theme = if self.theme.bg == theme::Theme::light_mode().bg {
+                    theme::Theme::dark_mode() } else { theme::Theme::light_mode() };
+                self.push("");
+            }
+
+            ["theme", which] => match *which {
+                "light" => { self.theme = theme::Theme::light_mode(); self.push(""); }
+                "dark"  => { self.theme = theme::Theme::dark_mode(); self.push(""); }
+                _ => self.push(""),
+            }
 
             ["equip", i] => if let Ok(ix) = i.parse::<usize>() {
                 match self.game.equip(ix) { Ok(_) => self.push("equipped"),
                     Err(e) => self.push(e) } } else { self.push("equip <idx>"); },
 
-            ["smelt", i] => if let Ok(ix) = i.parse::<usize>() {
+            ["equip", item, slot] => match (slot.parse::<usize>(), item.parse::<usize>()) {
+                (Ok(sl), Ok(ix)) => match self.game.equip_to_slot(sl, ix) {
+                    Ok(_) => self.push(format!("{sl}")),
+                    Err(e) => self.push(e),
+                },
+                _ => self.push(""),
+            }
+
+            ["unequip", slot] => match slot.parse::<usize>() {
+                Ok(sl) => match self.game.unequip_slot(sl) {
+                    Ok(_) => self.push(format!("{sl}")),
+                    Err(e) => self.push(e),
+                }
+                _ => self.push(""),
+            },
+
+            ["smelt"] => ?
+
+            /*["smelt", i] => if let Ok(ix) = i.parse::<usize>() {
                 match self.game.smelt(ix) { Ok(v) => self.push(format!("earned {:.0} copper", v)),
-                    Err(e) => self.push(e) } } else { self.push("smelt <idx>"); },
+                    Err(e) => self.push(e) } } else { self.push("smelt <idx>"); },*/
 
             ["enemy"] => self.comd_enemy(),
+
+            ["do", word] => match self.buffs.claim(word) {
+                Ok(len) => self.push_stylize(Line::from(vec![
+                    Span::styled(format!(" x {len} -> Damage"),
+                        Style::default().fg(self.theme.color_yellow).add_modifier(Modifier::BOLD)),
+                    Span::raw(format!("Damage x {}", self.buffs.multiplier())),
+                ])),
+                Err(e) => self.push(e),
+            },
+
             ["happybirthday"] => self.comd_hb(),
 
             //[""] => self.comd(),
@@ -181,16 +253,20 @@ impl Board {
             _ => return,
             //_ => self.push(""),
         }
-        let _ = exist::save(&self.game);
+        let _ = exist::autosave(&self.game, self.recall_game);
+        //let _ = exist::save(&self.game);
+        self.recall_game = self.recall_game.wrapping_add(1);
     }
 
-    fn comd_advice(&mut self) {
+    pub fn comd_advice(&mut self) {
         for l in [
-            "asd"
+            "qwerty...",
+            "asdfgh...",
+            "zxcvbn...",
         ] { self.push(l); }
     }
 
-    fn comd_see(&mut self) {
+    pub fn comd_see(&mut self) {
         let enemy = self.at_enemy.clone();
         self.push(format!("{}", self.game.clock.date_string()));
         self.push(format!("Stage [ {} ] ..| DPS [ {:.0} ] ..|",
@@ -221,14 +297,14 @@ impl Board {
         }
     }
 
-    fn comd_enemy(&mut self) {
+    pub fn comd_enemy(&mut self) {
         if let Some(e) = self.at_enemy.clone() {
             let pct = (self.hp_enemy_remaining / e.hp_max * 100.0).clamp(0.0, 100.0);
             self.push(format!(" Fighting {} -- HP {:.0}%", e.name, pct));
         }
     }
 
-    fn comd_gems(&mut self) {
+    pub fn comd_gems(&mut self) {
         self.push(format!("Coins: [ {:.0}c ] ..| Top Stage [ {} ] ..|",
             self.game.net_copper(), self.game.top_stage));
         for tier in 0..4u32 {
@@ -240,7 +316,7 @@ impl Board {
         }
     }
 
-    fn comd_store(&mut self, gem: u8, count: u32) {
+    pub fn comd_store(&mut self, gem: u8, count: u32) {
         let mut bought = 0u32;
         let mut last_err = String::new();
         for _ in 0..count {
@@ -258,8 +334,46 @@ impl Board {
 
     }
 
-    fn comd_crack(&mut self, g: &str, el: &str) {
-        let (gem, element) = match (g.parse::<u8>(), el.parse::<u8>()) {
+    pub fn comd_crack(&mut self, name: &str, count: &str) {
+        let for_count: u32 = match count.parse() {
+            Ok(n) if n >= 1 => n,
+            _ => { self.log("crack <name> <count>"); return; }
+        };
+
+        let Some(id) = gem_id(name) else {
+            self.log(&format!(" {name} is unavailable...")); return;
+        };
+        let have = *self.game.gems.get(name).unwrap_or(&0);
+        if have < count {
+            self.log(&format!("You only have {have} '{name}(s)', you cannot open {count}")); return;
+        }
+
+        let def = &GEMS[id];
+        let moon = self.game.clock.lunation_percent();
+        let reach = (self.game.stage + def.gem_tier as u32).min(tune::MAX_STEP);
+
+        *self.game.gems.get_mut(name).unwrap() -= count;
+
+        let mut best = 0.0f64;
+        for _ in 0..for_count {
+            let seed: u64   = self.rng.random();;
+            let step        = roll_step();
+            let elements    = roll_elements();
+            let stats       = roll_stats();
+            let w           = forge();
+            for &e in w.elements() { self.game.seen_elements.insert(e); }
+            best = best.max(paper_dps(&w));
+        }
+
+
+        self.bag_max_size();    // bound bag and smelt overflow capacity to dust
+        self.sort_bag_dps();    // highest dps
+        self.log(&format!(" {count} x {name} ({}dps)",
+            use_commas_f64(best)));
+    }
+
+
+        /*let (gem, element) = match (g.parse::<u8>(), el.parse::<u8>()) {
             (Ok(a), Ok(b)) => (a, b),
             _ => { self.push("'crack <gem 0-31> <element 0-31>"); return; }
         };
@@ -279,9 +393,38 @@ impl Board {
             }
             Err(e) => self.push(format!(" Failed to Crack the Gem... {e}")),
         }
+    }*/
+
+    pub fn bag_max_size(&mut self) {
+        if self.game.stash.len() <= BAG_CAP { return; }
+        self.sort_bag(); // worst sink to the tail?
+        let mut dust = 0u64;
+        while self.game.stash.len() > BAG_CAP {
+            match self.game.stash.iter().rposition(|w| !w.locked) {
+                Some(pos)   => dust += becomes_dust(&self.game.stash.remove(pos)),
+                None        => break,
+            }
+        }
+        self.game.dust += dust;
+        if dust > 0 { self.log(&format!("{dust}")); }
     }
 
-    fn comd_bag(&mut self) {
+    pub fn sort_bag(&mut self) {
+        self.game.stash.sort_by(|a, b| {
+            b.umbral.cmp(&a.umbral)
+                .then(buff(b).partial_cmp(&buff(a)).unwrap())
+        });
+    }
+
+    pub fn sort_ring(&mut self) {
+        let buff = |r: &Ring| r.atk_speed + r.crit_dmg;
+        self.game.ring_stash.sort_by(|a, b| {
+            b.regolith.cmp(&a.regolith)
+                .then(buff(b).partial_cmp(&buff(a)).unwrap())
+        });
+    }
+
+    pub fn comd_bag(&mut self) {
         if self.game.stash.is_empty() { self.push(" it's empty..?"); return; }
         let stash = self.game.stash.clone();
         for (i, w) in stash.iter().enumerate() {
@@ -293,11 +436,77 @@ impl Board {
         }
     }
 
-    fn comd_runs(&mut self) {
+    pub fn smelt_singleton(&mut self, idx: &str) {
+
+    }
+
+
+
+    pub fn smelt_every_bag(&mut self) {
+
+    }
+
+    pub fn smelt_single_ring(&mut self, idx: &str) {
+
+    }
+
+    pub fn smelt_every_ring(&mut self) {
+
+    }
+
+    pub fn parse_index(&mut self, s: &str, len: usize) -> Option<usize> {
+        match s.parse::<usize>() {
+            Ok(n) if n >= 1 && n <= len => Some(n - 1),
+            _ => { self.log(&format!("pick 1..{len}}")); None }
+        }
+    }
+
+    pub fn see_equipment(&mut self) {
+        let cols: Vec<Vec<string>> = (0..3)
+            .map(|s| match self.game.equipped.get(s) {
+                Some(w) => {
+                    let mut v = vec![format!("[{}] {}", grade_type(w.grade), w.name)];
+                    v.extend(stats_for_weapons(w));
+                    v
+                }
+                None => vec!["[] -".into()] // as emtpty
+        }).collect();
+        for row in zip_columns(&col, COL_W) { self.log(&row); }
+
+        self.log("");
+        let ring_cols: Vec<Vec<String>> = self.game.rings_equipped
+            .chunks(2)
+            .map(|pair| {
+                let mut col = Vec::new();
+                for slot in 0..2 {
+                    match pair.get(slot) {
+                        Some(r) => { col.push(format!("[{}] {}", grade_type(r.grade), r.name));
+                                     col.push(ring_line(r)); }
+                        None    => col.push("[] -".into()),
+                    }
+                }
+                col
+            }).collect();
+            for row in zip_columns(&ring_cols, COL_W) { self.log(&row); }
+    }
+
+    pub fn see_item(&mut self, idx: &str) {
+        let Some(i) = self.parse_index(idx, self.game.stash.len()) else { return; };
+        let w = &self.game.stash[i];
+        self.log(&format!("[{}] {}", grade_type(w.grade), w.name));
+        for l in stats_for_weapons(w) { self.log(&l); }
+    }
+
+
+
+
+
+
+    pub fn comd_runs(&mut self) {
         self.comd_runs_n(20);
     }
 
-    fn comd_runs_n(&mut self, n: usize) {
+    pub fn comd_runs_n(&mut self, n: usize) {
         let idx = exist::load_index();
         if idx.is_empty() { self.push("no saved runs yet..."); return; }
         self.push(format!("current runs {}", n.min(idx.len())));
@@ -314,7 +523,7 @@ impl Board {
         }
     }
 
-    fn comd_load(&mut self, id: &str) {
+    pub fn comd_load(&mut self, id: &str) {
         match exist::load(id) {
             Ok(g) => {
                 self.game = g;
@@ -331,7 +540,7 @@ impl Board {
         }
     }
 
-    fn comd_id(&mut self) {
+    pub fn comd_id(&mut self) {
         let id = id::loadout_short(&self.game.equipped);
         self.push_stylize(Line::from(vec![
             Span::raw(" char sheet id: "),
@@ -343,7 +552,7 @@ impl Board {
         }
     }
 
-    fn comd_import(&mut self, path: &str) {
+    pub fn comd_import(&mut self, path: &str) {
         match exist::import_file(path) {
             Ok(g) => { self.game = g; self.next_spawn(tune::Rank::Normal);
                 self.push_stylize(Line::from(vec![
@@ -357,12 +566,45 @@ impl Board {
         }
     }
 
-    fn comd_hb(&mut self) {
+    pub fn comd_hb(&mut self) {
 
     }
 }
 
-fn resolve_gem(query: &str) -> Option<u8> {
+pub fn stats_for_weapons(w: &Weapon) -> Vec<String> {
+    vec![
+        format!("[DG: {}]", short(w.base.base_dmg)),
+        format!("[AS: {:.2}]", w.base.attack_speed),
+        format!("[CC: {:.2}]", w.base.crit_chance * 100.0),
+        format!("[CD: {:.2}]", w.mods.crit_dmg * 100.0),
+        format!("[SW: {:.1}]", w.base.attack_sweep),
+        format!("[HA: {:.2}]", w.base.hit_accuracy),
+        format!("[LC: {:.1}]", w.base.lucky_chance),
+        format!("[WD: {:.1}]", w.base.weap_durability),
+    ]
+}
+
+fn ring_line(r: &Ring) -> String {
+    format!("[AS: +{:.2}] [CD: +{:.2}]",
+        (r.attack_speed - 1.0) * 100.0,
+        (r.crit_dmg - 1.0) * 100.0)
+}
+
+pub fn zip_columns(cols: &[Vec<String>], w: usize) -> Vec<String> {
+    let rows = cols.iter().map(Vec::len).max().unwrap_or(0);
+    (0..rows).map(|r| {
+        cols.iter()
+            .map(|c| format!("{:<w$}",
+                c.get(r)
+                    .map(String::as_str)
+                    .unwrap_or(""),
+                w = w)).collect()
+    }).collect()
+}
+
+
+
+pub fn resolve_gem(query: &str) -> Option<u8> {
     if let Ok(n) = query.parse::<u8>() {
         if (n as usize) < gems::N_GEMS { return Some(n); }
     }
@@ -373,6 +615,7 @@ fn resolve_gem(query: &str) -> Option<u8> {
     if matches.len() == 1 { Some(matches[0]) } else { None }
 }
 
+// why is this here and in theme??
 fn step_color(step: u32) -> Color {
     match step {
         1..=2 => Color::Gray,
@@ -383,6 +626,31 @@ fn step_color(step: u32) -> Color {
         _ => Color::Yellow,
     }
 }
+
+fn health_bar_status(current: f64, total_health: f64, rank: tune::Rank) -> String {
+    let width = match rank {
+        tune::Rank::Normal => 5,
+        tune::Rank::Elite => 8,
+        tune::Rank::Boss => 12,
+        tune::Rank::Overlord => 20,
+    };
+    let pct = if total_health > 0.0 {
+        (current / total_health).clamp(0.0, 1.0)
+    } else { 0.0 };
+    let fill_bar = (pct * width as f64).round() as usize;
+    let empty = width - fill_bar;
+    format!("[{}{}]", "#".repeat(fill_bar), "-".repeat(empty))
+}
+
+/*
+ *  MAIN BODY AND UI BEYOND
+ *
+ *
+ *
+ *
+ */
+
+
 
 fn main() -> io::Result<()> {
     enable_raw_mode()?;
@@ -409,7 +677,7 @@ fn main() -> io::Result<()> {
                 }
             }
         }
-        if save_timer.elapsed() > Duration::from_secs(11) {
+        if save_timer.elapsed() > Duration::from_secs(500) {
             let _ = exist::save(&board.game);
             save_timer = Instant::now();
         }
@@ -420,6 +688,10 @@ fn main() -> io::Result<()> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
     Ok(())
+}
+
+fn use_commas<T: ToString>(n: T) -> String {
+    format_number_string(&n.to_string())
 }
 
 fn use_commas_u32(n: u32) -> String {
@@ -442,6 +714,11 @@ fn use_commas_f64(n: f64) -> String {
     format_number_string(int_part)
 }
 
+fn use_commas_u128(n: u128) -> String {
+    let s = n.to_string();
+    format_number_string(&s)
+}
+
 fn format_number_string(s: &str) -> String {
     let mut num = String::new();
     let chars: Vec<char> = s.chars().collect();
@@ -459,6 +736,9 @@ fn ui(f: &mut Frame, board: &mut Board) {
     let base = Style::default().fg(board.theme.theme_fg).bg(board.theme.theme_bg);
     f.render_widget(Block::default().style(base), f.area());
 
+    // add this spinner somewhere??
+    //let finder_anim = [" ", ".", "o", "O", "O", "0", "8", ":", "'", " "];
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -473,6 +753,24 @@ fn ui(f: &mut Frame, board: &mut Board) {
             Constraint::Percentage(75),
             Constraint::Percentage(25)])
         .split(chunks[0]);
+
+    let bottom_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(68),
+            Constraint::Percentage(32)])
+        .split(chunks[2]);
+
+
+    let this_month = (board.game.clock.day / DAYS_WITHIN_MONTH) % 12;
+
+    let mut at_month = Strng::new();
+    for aaa in 0..12 {
+        if aaa > 0 {
+            at_month.push(' ');
+        }
+        at_month.push(if aaa == this_month { 'o' } else { '-' });
+    }
 
     let mut header_lines = vec![
     /*Line::from(format!(" Stage [ {} ] ..| Slain [ {} ] ..| Coins [ {} Pt, {} Au, {} Ag, {} Cu, ] ..| {}",
@@ -494,6 +792,7 @@ fn ui(f: &mut Frame, board: &mut Board) {
             if board.does_idle { "" } else { "WAIT" })),
         Line::from(format!("")),
         Line::from(format!(" {}", board.game.clock.date_string())),
+        Line::from(format!("  {}", at_month)),
         Line::from(format!("")),
         //Line::from(format!("{:?}", board.tick())),
     ];
@@ -502,8 +801,11 @@ fn ui(f: &mut Frame, board: &mut Board) {
     if let Some(e) = &enemy {
         let total_dmg_num = fight::effective_dps(&board.game.equipped, e);
         let pct = (board.hp_enemy_remaining / e.hp_max * 100.0).clamp(0.0, 100.0);
+        let enemy_health_bar = health_bar_status(board.hp_enemy_remaining, e.hp_max, e.rank);
+        let curr_amount = board.hp_enemy_remaining.max(0.0);
         header_lines.push(Line::from(vec![
-            Span::styled(format!(">>><<<  {} ", e.name), Style::default().fg(board.theme.color_red).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(">>><<<  {}  {} {} {}", e.name, curr_amount, e.hp_max, enemy_health_bar),
+                Style::default().fg(board.theme.color_red).add_modifier(Modifier::BOLD)),
             //Span::from(format!("")),
         ]));
         header_lines.push(Line::from(vec![
@@ -585,5 +887,12 @@ fn ui(f: &mut Frame, board: &mut Board) {
     f.render_widget(
         Paragraph::new(format!("> {}", board.input))
             .block(Block::default().borders(Borders::ALL).title_bottom("")),
-        chunks[2]);
+        bottom_chunks[0]);
+    f.render_widget(
+        //Paragraph::new(format!(" {}", id::loadout_sig(&loadout)))
+        //Paragraph::new(format!(" {}", use_commas_f64(board.hp_enemy_remaining)))
+        Paragraph::new(format!(" {:?}", exist::save(&board.game)))
+            .block(Block::default().borders(Borders::ALL).title_bottom(""))
+            .add_modifier(Modifier::BOLD),
+        bottom_chunks[1]);
 }
